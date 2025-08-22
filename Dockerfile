@@ -9,6 +9,7 @@ COPY requirements.txt ./
 COPY . .
 
 # Install dependencies
+RUN pip install --no-cache-dir torch==2.2.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Expose FastAPI default port

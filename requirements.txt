@@ -3,4 +3,4 @@ uvicorn
 python-dotenv
 supabase
 transformers
-torch
+torch==2.2.0+cpu
