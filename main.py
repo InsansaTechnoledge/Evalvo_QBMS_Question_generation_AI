@@ -1,12 +1,28 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 import qp_supabase  # your existing logic
 
 app = FastAPI(
     title="Exam Paper Generator API",
     description="API for generating exam papers using Supabase and hybrid parsing",
     version="1.0.0"
+)
+
+origins = [
+    "https://evalvotech.com",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://www.evalvotech.com",
+]
+ 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Input schema
