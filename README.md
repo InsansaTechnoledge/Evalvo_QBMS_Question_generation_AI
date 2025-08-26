@@ -1,1 +1,1 @@
-Open http://3.236.209.208:8000/docs in browser
+Open http://44.211.27.17:8000/docs in browser
