@@ -4,7 +4,7 @@ import random
 from functools import lru_cache
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import torch
 import warnings
 from supabase import create_client, Client
@@ -42,6 +42,63 @@ except Exception as e:
     tokenizer = None
     model = None
 
+# Add a class to track filtering process
+class FilteringReport:
+    def __init__(self):
+        self.steps = []
+        self.warnings = []
+        self.suggestions = []
+        self.final_count = 0
+        self.initial_count = 0
+        
+    def add_step(self, step_description, before_count, after_count):
+        self.steps.append({
+            'description': step_description,
+            'before': before_count,
+            'after': after_count
+        })
+        
+    def add_warning(self, warning_message):
+        self.warnings.append(warning_message)
+        
+    def add_suggestion(self, suggestion):
+        self.suggestions.append(suggestion)
+        
+    def set_initial_count(self, count):
+        self.initial_count = count
+        
+    def set_final_count(self, count):
+        self.final_count = count
+        
+    def generate_report(self):
+        report = "\n" + "="*60 + "\n"
+        report += "FILTERING PROCESS REPORT\n"
+        report += "="*60 + "\n"
+        
+        report += f"Initial questions in database: {self.initial_count}\n\n"
+        
+        if self.steps:
+            report += "Step-by-step filtering:\n"
+            report += "-" * 30 + "\n"
+            for step in self.steps:
+                report += f"• {step['description']}: {step['before']} → {step['after']} questions\n"
+            
+            report += f"\nFinal filtered results: {self.final_count} questions\n"
+        
+        if self.warnings:
+            report += "\nWARNINGS:\n"
+            report += "-" * 15 + "\n"
+            for warning in self.warnings:
+                report += f"⚠️  {warning}\n"
+        
+        if self.suggestions:
+            report += "\nSUGGESTIONS:\n"
+            report += "-" * 20 + "\n"
+            for suggestion in self.suggestions:
+                report += f"💡 {suggestion}\n"
+        
+        report += "\n" + "="*60 + "\n"
+        return report
 
 # Cache for database results to improve performance
 @lru_cache(maxsize=128)
@@ -207,6 +264,7 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
         "positive_marks": None, "bloom_level": None, "question_types_breakdown": None,
         "organization_id": organization_id
     }
+
     normalized_prompt = user_prompt.lower().strip()
     
     # NEW: Parse multiple question types with counts
@@ -572,73 +630,72 @@ def debug_database_content(criteria, organization_id: Optional[str] = None):
     print(f"\nSearch criteria: {criteria}")
     return questions
 
-def generate_exam_paper(user_prompt: str, organization_id: Optional[str] = None):
-    """Generate exam paper with Supabase data fetching"""
+def generate_exam_paper(user_prompt: str, organization_id: Optional[str] = None) -> Tuple[str, FilteringReport]:
+    """Generate exam paper with Supabase data fetching and return filtering report"""
+    report = FilteringReport()
+    
     try:
         criteria = parse_prompt_with_hybrid(user_prompt, organization_id)
         
         # Debug the database content
         all_questions = debug_database_content(criteria, organization_id)
+        report.set_initial_count(len(all_questions))
         
         if not all_questions:
-            print("❌ No questions found in database")
-            return None
+            report.add_warning("No questions found in database")
+            return "", report
         
         # Handle multiple question types
         if criteria.get("question_types_breakdown"):
-            return generate_multi_type_exam(criteria, all_questions, organization_id)
+            paper, multi_report = generate_multi_type_exam(criteria, all_questions, organization_id)
+            # Merge reports
+            report.steps.extend(multi_report.steps)
+            report.warnings.extend(multi_report.warnings)
+            report.suggestions.extend(multi_report.suggestions)
+            report.set_final_count(multi_report.final_count)
+            return paper, report
         
         # Original single-type logic
-        filtered_questions = filter_questions(all_questions, criteria)
+        filtered_questions, filter_report = filter_questions_with_report(all_questions, criteria)
+        report = filter_report
         
         print(f"\nFinal filtered results: {len(filtered_questions)} questions")
+        report.set_final_count(len(filtered_questions))
         
         if len(filtered_questions) < criteria['num_questions']:
-            print(f"\n❌ Error: Not enough questions matching criteria")
-            print(f"   Required: {criteria['num_questions']}")
-            print(f"   Available: {len(filtered_questions)}")
+            error_msg = f"Not enough questions matching criteria. Required: {criteria['num_questions']}, Available: {len(filtered_questions)}"
+            report.add_warning(error_msg)
+            print(f"\n❌ Error: {error_msg}")
             
-            # Suggest relaxing criteria
-            suggest_relaxed_criteria(all_questions, criteria)
-            return None
+            # Suggest relaxed criteria
+            suggestions = suggest_relaxed_criteria_with_report(all_questions, criteria)
+            for suggestion in suggestions:
+                report.add_suggestion(suggestion)
+            return "", report
         
         # Find balanced subset
-        selected_questions = find_balanced_subset(filtered_questions, criteria)
+        selected_questions, balance_warnings = find_balanced_subset_with_report(filtered_questions, criteria)
+        for warning in balance_warnings:
+            report.add_warning(warning)
+            
         if not selected_questions:
-            print("❌ Cannot find questions that sum to the exact total marks")
-            return None
+            report.add_warning("Cannot find questions that sum to the exact total marks")
+            return "", report
         
         # Generate the paper
-        paper = generate_paper_content(selected_questions, criteria)
-        return paper
+        paper = generate_paper_content_with_report(selected_questions, criteria, report)
+        return paper, report
         
     except Exception as e:
+        report.add_warning(f"Error generating exam paper: {e}")
         print(f"❌ Error generating exam paper: {e}")
-        return None
+        return "", report
 
-def suggest_relaxed_criteria(all_questions: List[Dict], criteria: Dict):
-    """Suggest relaxed criteria when not enough questions are found"""
-    print("\n💡 Suggestions to get more questions:")
-    
-    filter_fields = ['subject', 'chapter', 'question_type', 'difficulty', 'bloom_level', 'positive_marks']
-    
-    for field in filter_fields:
-        if criteria.get(field) is not None:
-            # Try without this field
-            temp_filtered = all_questions
-            for other_field in filter_fields:
-                if other_field != field and criteria.get(other_field) is not None:
-                    if isinstance(criteria[other_field], str):
-                        temp_filtered = [q for q in temp_filtered if q.get(other_field, '').lower() == criteria[other_field].lower()]
-                    else:
-                        temp_filtered = [q for q in temp_filtered if q.get(other_field) == criteria[other_field]]
-            
-            temp_count = len(temp_filtered)
-            print(f"   - Remove '{field}={criteria[field]}' constraint: {temp_count} questions available")
-
-def filter_questions(questions: List[Dict], criteria: Dict) -> List[Dict]:
-    """Filter questions based on criteria with improved matching"""
+def filter_questions_with_report(questions: List[Dict], criteria: Dict) -> Tuple[List[Dict], FilteringReport]:
+    """Filter questions based on criteria with detailed reporting"""
+    report = FilteringReport()
     filtered = questions
+    report.set_initial_count(len(questions))
     
     filter_fields = ['subject', 'chapter', 'question_type', 'difficulty', 'bloom_level', 'positive_marks']
     
@@ -656,21 +713,46 @@ def filter_questions(questions: List[Dict], criteria: Dict) -> List[Dict]:
                 filtered = [q for q in filtered if q.get(field) == criteria[field]]
             
             after_count = len(filtered)
+            step_desc = f"Filter by {field}={criteria[field]}"
+            report.add_step(step_desc, before_count, after_count)
             print(f"   {field}={criteria[field]}: {before_count} → {after_count} questions")
     
-    return filtered
+    return filtered, report
 
-def find_balanced_subset(filtered_questions: List[Dict], criteria: Dict) -> List[Dict]:
-    """Find subset that matches total marks exactly with improved algorithm"""
+def suggest_relaxed_criteria_with_report(all_questions: List[Dict], criteria: Dict) -> List[str]:
+    """Suggest relaxed criteria when not enough questions are found"""
+    suggestions = []
+    filter_fields = ['subject', 'chapter', 'question_type', 'difficulty', 'bloom_level', 'positive_marks']
+    
+    for field in filter_fields:
+        if criteria.get(field) is not None:
+            # Try without this field
+            temp_filtered = all_questions
+            for other_field in filter_fields:
+                if other_field != field and criteria.get(other_field) is not None:
+                    if isinstance(criteria[other_field], str):
+                        temp_filtered = [q for q in temp_filtered if q.get(other_field, '').lower() == criteria[other_field].lower()]
+                    else:
+                        temp_filtered = [q for q in temp_filtered if q.get(other_field) == criteria[other_field]]
+            
+            temp_count = len(temp_filtered)
+            suggestion = f"Remove '{field}={criteria[field]}' constraint: {temp_count} questions available"
+            suggestions.append(suggestion)
+    
+    return suggestions
+
+def find_balanced_subset_with_report(filtered_questions: List[Dict], criteria: Dict) -> Tuple[List[Dict], List[str]]:
+    """Find subset that matches total marks exactly with warnings"""
+    warnings = []
     num_questions = criteria['num_questions']
     max_marks = criteria.get('max_marks')
     
     if len(filtered_questions) < num_questions:
-        return []
+        return [], warnings
     
     # If no marks constraint, just return random selection
     if not max_marks:
-        return random.sample(filtered_questions, num_questions)
+        return random.sample(filtered_questions, num_questions), warnings
     
     print(f"🎯 Finding {num_questions} questions totaling {max_marks} marks")
     
@@ -688,7 +770,7 @@ def find_balanced_subset(filtered_questions: List[Dict], criteria: Dict) -> List
     if len(filtered_questions) <= 50 and num_questions <= 10:
         result = find_exact_subset_dp(filtered_questions, num_questions, max_marks)
         if result:
-            return result
+            return result, warnings
     
     # Fallback to random sampling with improvement attempts
     best_selection = None
@@ -706,15 +788,17 @@ def find_balanced_subset(filtered_questions: List[Dict], criteria: Dict) -> List
             
         if diff == 0:  # Perfect match
             print(f"✅ Found exact match: {num_questions} questions, {max_marks} marks")
-            return sample
+            return sample, warnings
     
     if best_selection:
         actual_marks = sum([q.get('positive_marks', 0) for q in best_selection])
         if best_diff > 0:
-            print(f"⚠️  Warning: Using {actual_marks} marks instead of {max_marks} (difference: {best_diff})")
-        return best_selection
+            warning = f"Cannot find exact match for {max_marks} marks. Using {actual_marks} marks instead of {max_marks} (difference: {best_diff})"
+            warnings.append(warning)
+            print(f"⚠️ Warning: {warning}")
+        return best_selection, warnings
     
-    return []
+    return [], warnings
 
 def find_exact_subset_dp(questions: List[Dict], num_questions: int, target_marks: int) -> List[Dict]:
     """Dynamic programming approach to find exact subset (for small datasets)"""
@@ -758,14 +842,17 @@ def find_exact_subset_dp(questions: List[Dict], num_questions: int, target_marks
         print(f"Error in dynamic programming subset selection: {e}")
         return []
 
-def generate_multi_type_exam(criteria: Dict, all_questions: List[Dict], organization_id: Optional[str] = None):
-    """Generate exam with multiple question types from Supabase"""
+def generate_multi_type_exam(criteria: Dict, all_questions: List[Dict], organization_id: Optional[str] = None) -> Tuple[str, FilteringReport]:
+    """Generate exam with multiple question types from Supabase with detailed reporting"""
+    report = FilteringReport()
     question_types_breakdown = criteria["question_types_breakdown"]
     max_marks = criteria.get("max_marks")
     
     all_selected_questions = []
     total_questions = 0
     total_marks_used = 0
+    
+    report.set_initial_count(len(all_questions))
     
     print(f"\n🎯 Generating multi-type exam:")
     print(f"   Question breakdown: {question_types_breakdown}")
@@ -776,22 +863,29 @@ def generate_multi_type_exam(criteria: Dict, all_questions: List[Dict], organiza
         
         # Filter questions for this type
         type_questions = [q for q in all_questions if q.get('question_type', '').lower() == q_type.lower()]
+        before_count = len(type_questions)
         
         # Apply other criteria
         filtered_questions = type_questions
         filter_fields = ['subject', 'chapter', 'difficulty', 'bloom_level']
         for field in filter_fields:
             if criteria.get(field) is not None:
+                before_field_count = len(filtered_questions)
                 if isinstance(criteria[field], str):
                     filtered_questions = [q for q in filtered_questions if q.get(field, '').lower() == criteria[field].lower()]
                 else:
                     filtered_questions = [q for q in filtered_questions if q.get(field) == criteria[field]]
+                after_field_count = len(filtered_questions)
+                
+                step_desc = f"{q_type.upper()} - Filter by {field}={criteria[field]}"
+                report.add_step(step_desc, before_field_count, after_field_count)
         
         print(f"   Available {q_type} questions: {len(filtered_questions)}")
         
         if len(filtered_questions) < count:
-            print(f"   ❌ Not enough {q_type} questions available")
-            print(f"      Required: {count}, Available: {len(filtered_questions)}")
+            warning = f"Not enough {q_type} questions available. Required: {count}, Available: {len(filtered_questions)}"
+            report.add_warning(warning)
+            print(f"   ❌ {warning}")
             continue
         
         # If we have max_marks constraint, try to distribute marks evenly
@@ -815,19 +909,27 @@ def generate_multi_type_exam(criteria: Dict, all_questions: List[Dict], organiza
         if selected:
             all_selected_questions.extend(selected)
             total_questions += len(selected)
-            total_marks_used += sum([q.get('positive_marks', 0) for q in selected])
+            selected_marks = sum([q.get('positive_marks', 0) for q in selected])
+            total_marks_used += selected_marks
             
-            print(f"   ✅ Selected {len(selected)} {q_type} questions ({sum([q.get('positive_marks', 0) for q in selected])} marks)")
+            print(f"   ✅ Selected {len(selected)} {q_type} questions ({selected_marks} marks)")
     
     if not all_selected_questions:
+        report.add_warning("No questions could be selected for any question type")
         print("❌ No questions could be selected for any question type")
-        return None
+        return "", report
     
+    # Check for marks mismatch in multi-type exam
+    if max_marks and total_marks_used != max_marks:
+        warning = f"Total marks mismatch in multi-type exam. Target: {max_marks}, Actual: {total_marks_used}"
+        report.add_warning(warning)
+    
+    report.set_final_count(total_questions)
     print(f"\n📊 Final selection: {total_questions} questions, {total_marks_used} marks")
     
     # Generate the paper
-    paper = generate_multi_type_paper_content(all_selected_questions, criteria, question_types_breakdown)
-    return paper
+    paper = generate_multi_type_paper_content_with_report(all_selected_questions, criteria, question_types_breakdown, report)
+    return paper, report
 
 def find_questions_for_marks(filtered_questions: List[Dict], count: int, target_marks: int) -> List[Dict]:
     """Try to find questions that approximately match target marks"""
@@ -852,9 +954,11 @@ def find_questions_for_marks(filtered_questions: List[Dict], count: int, target_
     
     return best_selection if best_selection is not None else random.sample(filtered_questions, count)
 
-def generate_multi_type_paper_content(selected_questions: List[Dict], criteria: Dict, question_types_breakdown: Dict) -> str:
-    """Generate the formatted exam paper for multiple question types"""
-    paper = "Exam Paper\n"
+def generate_multi_type_paper_content_with_report(selected_questions: List[Dict], criteria: Dict, question_types_breakdown: Dict, report: FilteringReport) -> str:
+    """Generate the formatted exam paper for multiple question types with filtering report"""
+    paper = report.generate_report()
+    
+    paper += "\nExam Paper\n"
     paper += "=" * 50 + "\n"
     paper += f"Subject: {criteria.get('subject', 'Various')}\n"
     paper += f"Chapter: {criteria.get('chapter', 'Various')}\n"
@@ -898,9 +1002,11 @@ def generate_multi_type_paper_content(selected_questions: List[Dict], criteria: 
     
     return paper
 
-def generate_paper_content(selected_questions: List[Dict], criteria: Dict) -> str:
-    """Generate the formatted exam paper for single question type"""
-    paper = "Exam Paper\n"
+def generate_paper_content_with_report(selected_questions: List[Dict], criteria: Dict, report: FilteringReport) -> str:
+    """Generate the formatted exam paper for single question type with filtering report"""
+    paper = report.generate_report()
+    
+    paper += "\nExam Paper\n"
     paper += "=" * 50 + "\n"
     paper += f"Subject: {criteria.get('subject', 'Various')}\n"
     paper += f"Chapter: {criteria.get('chapter', 'Various')}\n"
@@ -1082,33 +1188,6 @@ def format_question(q_type: str, detail: Dict, marks: int, is_sub: bool = False)
     else:
         return f"{prefix}{q_type.upper()}: {detail.get('question_text', detail.get('statement', 'Question text not available'))}"
 
-def test_multi_type_parsing():
-    """Test parsing of multiple question types"""
-    multi_type_prompts = [
-        "Generate an exam paper with 5 mcqs, 5 msqs, 5 true false, maximum 5 marks, subject pos, difficulty medium",
-        "Create 3 mcq, 2 descriptive, and 4 numerical questions for Mathematics",
-        "Make an exam with 10 multiple choice, 5 fill in the blanks, 3 match the following",
-        "Generate 2 mcqs, 3 tf, 1 comprehension question, total 15 marks",
-        "Design paper having 4 mcq questions, 2 msq questions, 3 descriptive questions"
-    ]
-    
-    print("\nTesting Multiple Question Type Parsing:")
-    print("=" * 60)
-    
-    for i, prompt in enumerate(multi_type_prompts, 1):
-        print(f"\n{i}. Prompt: {prompt}")
-        try:
-            criteria = parse_prompt_with_hybrid(prompt)
-            print("   Parsed:")
-            for key, value in criteria.items():
-                if value is not None:
-                    if key == "question_types_breakdown":
-                        print(f"     {key}: {value}")
-                        print(f"     total_questions: {sum(value.values())}")
-                    else:
-                        print(f"     {key}: {value}")
-        except Exception as e:
-            print(f"   Error: {e}")
 
 def test_supabase_connection():
     """Test Supabase database connection"""
@@ -1153,13 +1232,10 @@ def main():
         print("   - Create a .env file with SUPABASE_URL and SUPABASE_ANON_KEY")
         print("   - Or set these as environment variables")
         return
-    
-    # Test multi-type parsing
-    # test_multi_type_parsing()
 
     # Main exam generation with multi-type example
-    example_prompt = "Generate an exam paper with 2 mcqs, 2 msqs, 1 true false, maximum 10 marks, subject pos, difficulty medium"
-    organization_id = "6891ec414b42bf9aa0756903"  # Replace with actual organization ID
+    example_prompt = "Generate an exam paper with 3 mcqs, maximum 10 marks, subject Big Data"
+    organization_id = "686e4d384529d5bc5f8a93e1"  # Replace with actual organization ID
     
     print(f"\n{'='*70}")
     print("MAIN EXAM GENERATION")
@@ -1182,7 +1258,6 @@ def main():
     except Exception as e:
         print(f"❌ Error: {e}")
         print("💡 Running parsing test instead...")
-        test_multi_type_parsing()
 
 if __name__ == "__main__":
     main()
