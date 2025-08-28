@@ -10,6 +10,7 @@ import warnings
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
+from datetime import date
 
 # Load environment variables
 load_dotenv()
@@ -262,7 +263,7 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
         "num_questions": None, "max_marks": None, "subject": None,
         "chapter": None, "question_type": None, "difficulty": None,
         "positive_marks": None, "bloom_level": None, "question_types_breakdown": None,
-        "organization_id": organization_id
+        "batch_name": None, "organization_id": organization_id
     }
 
     normalized_prompt = user_prompt.lower().strip()
@@ -277,6 +278,12 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
     
     # Enhanced regex patterns with comprehensive question type detection
     patterns = {
+        "batch_name": [
+            r"batch\s*[:=]\s*([^,\n]+?)(?:\s*[,\n]|$)",
+            r"(?:for|in)\s*batch\s*[:=]?\s*([^,\n]+?)(?:\s*[,\n]|$)",
+            r"batch\s+name\s*[:=]?\s*([^,\n]+?)(?:\s*[,\n]|$)",
+            r"batch\s+([A-Za-z0-9\s\-_]+?)(?:\s+with\s+\d+|\s*[,\n]|$)"  # Stop at "with" keyword
+        ],
         "num_questions": [
             r"(?:generate|create|make)?\s*(?:an?\s*)?(?:exam\s*paper\s*with\s*)?(\d+)\s*(?:questions?)",
             r"(\d+)\s*questions?\s*(?:exam|paper|test)?",
@@ -328,8 +335,8 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
     }
 
     # Update the pattern application order
-    field_order = ['question_type', 'num_questions', 'max_marks', 'subject', 'chapter', 'difficulty', 'bloom_level', 'positive_marks']
-    
+    field_order = ['batch_name', 'question_type', 'num_questions', 'max_marks', 'subject', 'chapter', 'difficulty', 'bloom_level', 'positive_marks']
+
     # Apply regex patterns in specific order
     for key in field_order:
         if key not in patterns:
@@ -498,6 +505,20 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
             if normalized_value in mappings:
                 criteria[field] = mappings[normalized_value]
 
+    # Clean up batch name to remove exam-related keywords
+    if criteria.get('batch_name') and isinstance(criteria['batch_name'], str):
+        batch_name = criteria['batch_name'].strip()
+        # Remove common exam-related suffixes
+        cleanup_patterns = [
+            r'\s+with\s+\d+.*$',  # Remove "with 3 mcqs" etc
+            r'\s+exam.*$',        # Remove "exam paper" etc
+            r'\s+paper.*$',       # Remove "paper" etc
+            r'\s+questions?.*$'   # Remove "questions" etc
+        ]
+        for pattern in cleanup_patterns:
+            batch_name = re.sub(pattern, '', batch_name, flags=re.IGNORECASE)
+        criteria['batch_name'] = batch_name.strip()
+
     # LLM fallback for missing critical fields using DialoGPT-medium
     missing_fields = [k for k, v in criteria.items() if v is None and k in ['num_questions', 'max_marks', 'subject', 'chapter', 'question_type']]
     
@@ -505,17 +526,18 @@ def parse_prompt_with_hybrid(user_prompt: str, organization_id: Optional[str] = 
         try:
             print(f"🤖 Using DialoGPT-medium fallback for missing fields: {missing_fields}")
             
-            # IMPROVED PROMPT - More explicit about returning null/empty values
             extraction_prompt = f"""Extract information from this exam request: "{user_prompt}"
 
 STRICT RULES:
 - Only extract information that is EXPLICITLY mentioned in the prompt
+- For batch_name: extract only the actual batch identifier, not the full exam description
 - If a field is not clearly specified, return "NULL" for that field
 - Do not make assumptions or use default values
 - Convert spelled numbers to digits (e.g., 'two' -> 2)
 - If user does spelling mistake then take it as the nearest correct word which is related. 
 
 Extract these fields:
+batch_name: [batch identifier only, like "CS101" or "Data Science Batch A", or NULL]
 questions: [number of questions or NULL]
 marks: [total marks or NULL] 
 subject: [subject name or NULL]
@@ -552,6 +574,7 @@ Output:"""
             
             # Parse LLM response with improved null handling
             llm_patterns = {
+                'batch_name': r'batch_name\s*[:=]\s*([^\n,]+?)(?:\s*[,\n]|$)',
                 'num_questions': r'questions?\s*[:=]\s*(\d+|NULL)',
                 'max_marks': r'marks?\s*[:=]\s*(\d+|NULL)',
                 'subject': r'subject\s*[:=]\s*([^\n,]+?)(?:\s*[,\n]|$)',
@@ -611,6 +634,35 @@ Output:"""
         raise ValueError("Number of questions and maximum marks must be specified in the prompt.")
 
     return criteria
+
+def store_batch_exam(criteria: Dict, selected_questions: List[Dict]) -> Optional[str]:
+    """Store batch exam details in the database"""
+    if not supabase or not criteria.get('batch_name'):
+        return None
+    
+    try:
+        total_marks = sum([q.get('positive_marks', 0) for q in selected_questions])
+        subjects = list(set([q.get('subject') for q in selected_questions if q.get('subject')]))
+        
+        exam_data = {
+            'name': criteria['batch_name'],
+            'date': date.today().isoformat(),
+            'organization_id': criteria['organization_id'],
+            'total_marks': total_marks,
+            'subjects': subjects,
+            'description': f"Auto-generated exam with {len(selected_questions)} questions"
+        }
+        
+        print(f"Debug: Attempting to insert: {exam_data}")  # Debug line
+        response = supabase.table('batch_exam').insert(exam_data).execute()
+        
+        if response.data:
+            print(f"Stored batch exam: {criteria['batch_name']}")
+            return response.data[0]['id']
+    except Exception as e:
+        print(f"Error storing batch exam: {e}")
+        print("Debug: Check if RLS policy is properly enabled for INSERT operations")
+    return None
 
 def debug_database_content(criteria, organization_id: Optional[str] = None):
     """Debug function to show what's available in the database"""
@@ -684,6 +736,13 @@ def generate_exam_paper(user_prompt: str, organization_id: Optional[str] = None)
         
         # Generate the paper
         paper = generate_paper_content_with_report(selected_questions, criteria, report)
+        
+        # Store batch exam if batch name is provided
+        if criteria.get('batch_name'):
+            exam_id = store_batch_exam(criteria, selected_questions)
+            if exam_id:
+                paper = f"Batch Exam ID: {exam_id}\n" + paper
+        
         return paper, report
         
     except Exception as e:
@@ -929,6 +988,13 @@ def generate_multi_type_exam(criteria: Dict, all_questions: List[Dict], organiza
     
     # Generate the paper
     paper = generate_multi_type_paper_content_with_report(all_selected_questions, criteria, question_types_breakdown, report)
+    
+    # Store batch exam if batch name is provided
+    if criteria.get('batch_name'):
+        exam_id = store_batch_exam(criteria, all_selected_questions)
+        if exam_id:
+            paper = f"Batch Exam ID: {exam_id}\n" + paper
+    
     return paper, report
 
 def find_questions_for_marks(filtered_questions: List[Dict], count: int, target_marks: int) -> List[Dict]:
@@ -1234,7 +1300,7 @@ def main():
         return
 
     # Main exam generation with multi-type example
-    example_prompt = "Generate an exam paper with 3 mcqs, maximum 10 marks, subject Big Data"
+    example_prompt = "Generate an exam paper for batch demo with 3 mcqs, maximum 10 marks, subject Big Data"
     organization_id = "686e4d384529d5bc5f8a93e1"  # Replace with actual organization ID
     
     print(f"\n{'='*70}")
