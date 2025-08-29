@@ -62,7 +62,7 @@ Create a .env file in the project root:
 
 SUPABASE_URL=your_supabase_url_here
 SUPABASE_ANON_KEY=your_supabase_anon_key_here
-
+'''
 🚀 Running the Application
 
 Standalone version
