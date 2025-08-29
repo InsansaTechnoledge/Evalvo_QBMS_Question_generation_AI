@@ -63,14 +63,13 @@ Create a .env file in the project root:
 SUPABASE_URL=your_supabase_url_here
 SUPABASE_ANON_KEY=your_supabase_anon_key_here
 '''
+
 🚀 Running the Application
 
 Standalone version
-
 python main.py
 
 API server
-
 python server.py
          OR
 uvicorn api.fastapi_app:app --host 0.0.0.0 --port 8000 --reload
@@ -78,27 +77,14 @@ uvicorn api.fastapi_app:app --host 0.0.0.0 --port 8000 --reload
 🌐 API Endpoints
 
 Root: http://localhost:8000/
-
 Generate Exam: POST /generate_exam
-
 Test Connection: GET /test_connection
-
 Docs (Swagger): http://localhost:8000/docs
 
 📌 Example Usage
 curl -X POST "http://localhost:8000/generate_exam" \
      -H "Content-Type: application/json" \
      -d '{
-           "prompt": "Generate 5 MCQ questions for Math with maximum 20 marks",
-           "organization_id": "your_org_id"
+           "prompt": "Generate an exam paper for batch demo with 3 mcqs, maximum 10 marks, subject Big Data",
+           "organization_id": "686e4d384529d5bc5f8a93e1"
          }'
-
-🛠️ Tech Stack
-
-Python 3.x
-
-FastAPI – Modern API framework
-
-Supabase – Database backend
-
-Uvicorn – ASGI server
