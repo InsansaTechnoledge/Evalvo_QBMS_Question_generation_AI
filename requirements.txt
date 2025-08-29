@@ -6,3 +6,4 @@ transformers==4.51.3
 torch==2.7.0
 numpy==1.23.5
 fastapi.middleware.cors
+pydantic
