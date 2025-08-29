@@ -1,7 +1,13 @@
-A modular exam paper generation system built with FastAPI, Supabase, and Python.
-Supports both a standalone script and an API server for flexible usage.
+# Exam Generator  
 
-📂 Project Structure
+A modular **exam paper generation system** built with **FastAPI**, **Supabase**, and **Python**.  
+Supports both a **standalone script** and an **API server** for flexible usage.  
+
+---
+
+## 📂 Project Structure
+
+```bash
 exam_generator/
 ├── config.py
 ├── main.py
@@ -38,12 +44,16 @@ exam_generator/
         ├── __init__.py
         └── exam_routes.py
 
+
 ⚙️ Setup Instructions
 1. Clone the repository
+
 git clone https://github.com/your-username/exam-generator.git
 cd exam-generator
 
+
 2. Install dependencies
+
 pip install -r requirements.txt
 
 3. Configure environment variables
@@ -54,12 +64,15 @@ SUPABASE_URL=your_supabase_url_here
 SUPABASE_ANON_KEY=your_supabase_anon_key_here
 
 🚀 Running the Application
+
 Standalone version
+
 python main.py
 
 API server
+
 python server.py
-# OR
+         OR
 uvicorn api.fastapi_app:app --host 0.0.0.0 --port 8000 --reload
 
 🌐 API Endpoints
